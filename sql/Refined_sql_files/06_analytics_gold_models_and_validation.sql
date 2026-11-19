@@ -1,0 +1,519 @@
+-- AdventureWorks: ANALYTICS / Gold layer
+-- Builds DIM_DATE, DIM_CUSTOMER, DIM_PRODUCT, DIM_TERRITORY,
+-- FACT_SALES and FACT_PURCHASES, followed by Gold-layer validation queries.
+
+--GOLD LAYER
+
+
+--Dim_Date
+
+SELECT
+    MIN("OrderDate")::DATE AS FIRST_ORDER_DATE,
+    MAX("OrderDate")::DATE AS LAST_ORDER_DATE
+FROM ADVENTUREWORKS_DB.CLEAN.SALESORDERHEADER;
+
+SELECT
+    MIN("OrderDate")::DATE AS FIRST_PURCHASE_DATE,
+    MAX("OrderDate")::DATE AS LAST_PURCHASE_DATE
+FROM ADVENTUREWORKS_DB.CLEAN.PURCHASEORDERHEADER;
+
+
+CREATE OR REPLACE TABLE ADVENTUREWORKS_DB.ANALYTICS.DIM_DATE AS
+
+WITH DATE_SERIES AS (
+    SELECT
+        DATEADD(
+            DAY,
+            SEQ4(),
+            '2022-04-15'::DATE
+        )::DATE AS FULL_DATE
+    FROM TABLE(GENERATOR(ROWCOUNT => 1256))
+)
+
+SELECT
+    TO_NUMBER(TO_CHAR(FULL_DATE, 'YYYYMMDD')) AS DATE_KEY,
+    FULL_DATE,
+
+    DAY(FULL_DATE) AS DAY,
+    DAYNAME(FULL_DATE) AS DAY_NAME,
+    DAYOFWEEKISO(FULL_DATE) AS DAY_OF_WEEK,
+
+    WEEKISO(FULL_DATE) AS WEEK_OF_YEAR,
+
+    MONTH(FULL_DATE) AS MONTH,
+    MONTHNAME(FULL_DATE) AS MONTH_NAME,
+
+    QUARTER(FULL_DATE) AS QUARTER,
+    YEAR(FULL_DATE) AS YEAR,
+
+    TO_CHAR(FULL_DATE, 'YYYY-MM') AS YEAR_MONTH,
+
+    IFF(DAYOFWEEKISO(FULL_DATE) IN (6, 7), TRUE, FALSE)
+        AS IS_WEEKEND
+
+FROM DATE_SERIES;
+
+SELECT
+    COUNT(*) AS TOTAL_ROWS,
+    COUNT(DISTINCT DATE_KEY) AS UNIQUE_DATE_KEYS,
+    MIN(FULL_DATE) AS FIRST_DATE,
+    MAX(FULL_DATE) AS LAST_DATE
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_DATE;
+
+SELECT
+    DATEDIFF(DAY, MIN(FULL_DATE), MAX(FULL_DATE)) + 1
+        AS EXPECTED_ROWS,
+    COUNT(*) AS ACTUAL_ROWS
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_DATE;
+
+
+
+
+
+--DIM_Customer
+
+
+SELECT
+    COUNT(*) AS TOTAL_CUSTOMERS,
+    COUNT(DISTINCT "CustomerID") AS UNIQUE_CUSTOMERS,
+    COUNT_IF("PersonID" IS NOT NULL) AS PERSON_CUSTOMERS,
+    COUNT_IF("StoreID" IS NOT NULL) AS STORE_CUSTOMERS,
+    COUNT_IF("PersonID" IS NULL AND "StoreID" IS NULL)
+        AS CUSTOMERS_WITHOUT_PERSON_OR_STORE
+FROM ADVENTUREWORKS_DB.CLEAN.CUSTOMER;
+
+SELECT
+    COUNT_IF(
+        c."PersonID" IS NOT NULL
+        AND p."BusinessEntityID" IS NULL
+    ) AS INVALID_PERSON_REFERENCES,
+
+    COUNT_IF(
+        c."StoreID" IS NOT NULL
+        AND s."BusinessEntityID" IS NULL
+    ) AS INVALID_STORE_REFERENCES
+
+FROM ADVENTUREWORKS_DB.CLEAN.CUSTOMER c
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.PERSON p
+    ON c."PersonID" = p."BusinessEntityID"
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.STORE s
+    ON c."StoreID" = s."BusinessEntityID";
+
+
+SELECT
+    CASE
+        WHEN "PersonID" IS NOT NULL THEN 'Individual'
+        WHEN "StoreID" IS NOT NULL THEN 'Store'
+        ELSE 'Unclassified'
+    END AS CUSTOMER_TYPE,
+    COUNT(*) AS CUSTOMER_COUNT
+FROM ADVENTUREWORKS_DB.CLEAN.CUSTOMER
+GROUP BY 1;
+
+
+CREATE OR REPLACE TABLE ADVENTUREWORKS_DB.ANALYTICS.DIM_CUSTOMER AS
+
+SELECT
+    c."CustomerID",
+    c."AccountNumber",
+    c."PersonID",
+    c."StoreID",
+    c."TerritoryID",
+
+    CASE
+        WHEN c."PersonID" IS NOT NULL THEN 'Individual'
+        WHEN c."StoreID" IS NOT NULL THEN 'Store'
+        ELSE 'Unclassified'
+    END AS "CustomerType",
+
+    p."FullName" AS "CustomerName",
+    s."Name" AS "StoreName"
+
+FROM ADVENTUREWORKS_DB.CLEAN.CUSTOMER c
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.PERSON p
+    ON c."PersonID" = p."BusinessEntityID"
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.STORE s
+    ON c."StoreID" = s."BusinessEntityID";
+
+SELECT
+    COUNT(*) AS TOTAL_ROWS,
+    COUNT(DISTINCT "CustomerID") AS UNIQUE_CUSTOMERS,
+    COUNT_IF("CustomerType" = 'Individual') AS INDIVIDUALS,
+    COUNT_IF("CustomerType" = 'Store') AS STORES,
+    COUNT_IF("CustomerName" IS NULL AND "StoreName" IS NULL)
+        AS MISSING_NAMES
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_CUSTOMER;
+
+SELECT
+    (SELECT COUNT(*) FROM ADVENTUREWORKS_DB.CLEAN.CUSTOMER) AS SOURCE_COUNT,
+    (SELECT COUNT(*) FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_CUSTOMER) AS GOLD_COUNT;
+
+
+
+
+
+--Dim_Product
+
+SELECT
+    COUNT(*) AS TOTAL_PRODUCTS,
+    COUNT(DISTINCT "ProductID") AS UNIQUE_PRODUCTS,
+    COUNT_IF("ProductID" IS NULL) AS NULL_PRODUCT_IDS,
+    COUNT_IF("Name" IS NULL OR TRIM("Name") = '') AS INVALID_NAMES
+FROM ADVENTUREWORKS_DB.CLEAN.PRODUCT;
+
+SELECT COUNT(*) AS INVALID_SUBCATEGORY_REFERENCES
+FROM ADVENTUREWORKS_DB.CLEAN.PRODUCT p
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.PRODUCTSUBCATEGORY ps
+    ON p."ProductSubcategoryID" = ps."ProductSubcategoryID"
+WHERE p."ProductSubcategoryID" IS NOT NULL
+  AND ps."ProductSubcategoryID" IS NULL;
+
+
+SELECT COUNT(*) AS INVALID_CATEGORY_REFERENCES
+FROM ADVENTUREWORKS_DB.CLEAN.PRODUCTSUBCATEGORY ps
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.PRODUCTCATEGORY pc
+    ON ps."ProductCategoryID" = pc."ProductCategoryID"
+WHERE pc."ProductCategoryID" IS NULL;
+
+
+
+CREATE OR REPLACE TABLE ADVENTUREWORKS_DB.ANALYTICS.DIM_PRODUCT AS
+
+SELECT
+    p."ProductID",
+    p."Name" AS "ProductName",
+    p."ProductNumber",
+    p."Color",
+    p."StandardCost",
+    p."ListPrice",
+    p."Size",
+    p."ProductLine",
+    p."Class",
+    p."Style",
+
+    ps."Name" AS "SubcategoryName",
+    pc."Name" AS "CategoryName",
+    pm."Name" AS "ModelName"
+
+FROM ADVENTUREWORKS_DB.CLEAN.PRODUCT p
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.PRODUCTSUBCATEGORY ps
+    ON p."ProductSubcategoryID" = ps."ProductSubcategoryID"
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.PRODUCTCATEGORY pc
+    ON ps."ProductCategoryID" = pc."ProductCategoryID"
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.PRODUCTMODEL pm
+    ON p."ProductModelID" = pm."ProductModelID";
+
+SELECT
+    COUNT(*) AS TOTAL_ROWS,
+    COUNT(DISTINCT "ProductID") AS UNIQUE_PRODUCTS,
+    COUNT_IF("CategoryName" IS NULL) AS PRODUCTS_WITHOUT_CATEGORY,
+    COUNT_IF("ModelName" IS NULL) AS PRODUCTS_WITHOUT_MODEL
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_PRODUCT;
+
+SELECT
+    (SELECT COUNT(*) FROM ADVENTUREWORKS_DB.CLEAN.PRODUCT) AS SOURCE_COUNT,
+    (SELECT COUNT(*) FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_PRODUCT) AS GOLD_COUNT;
+
+
+
+
+
+
+
+--Dim_Territory
+
+
+SELECT
+    COUNT(*) AS TOTAL_TERRITORIES,
+    COUNT(DISTINCT "TerritoryID") AS UNIQUE_TERRITORIES,
+    COUNT_IF("CountryRegionCode" IS NULL) AS NULL_COUNTRY_CODES
+FROM ADVENTUREWORKS_DB.CLEAN.SALESTERRITORY;
+
+CREATE OR REPLACE TABLE ADVENTUREWORKS_DB.ANALYTICS.DIM_TERRITORY AS
+
+SELECT
+    t."TerritoryID",
+    t."Name" AS "TerritoryName",
+    t."CountryRegionCode",
+    c."Name" AS "CountryName",
+    t."Group" AS "TerritoryGroup",
+    t."SalesYTD",
+    t."SalesLastYear",
+    t."CostYTD",
+    t."CostLastYear"
+
+FROM ADVENTUREWORKS_DB.CLEAN.SALESTERRITORY t
+
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.COUNTRYREGION c
+    ON t."CountryRegionCode" = c."CountryRegionCode";
+
+SELECT * FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_TERRITORY;
+
+
+
+
+
+
+
+--Fact_Sales
+
+SELECT
+    COUNT(*) AS TOTAL_ORDER_LINES,
+    COUNT_IF(h."SalesOrderID" IS NULL) AS ORPHAN_ORDER_LINES
+FROM ADVENTUREWORKS_DB.CLEAN.SALESORDERDETAIL d
+LEFT JOIN ADVENTUREWORKS_DB.CLEAN.SALESORDERHEADER h
+    ON d."SalesOrderID" = h."SalesOrderID";
+
+SELECT
+    COUNT(*) AS TOTAL_ORDER_HEADERS,
+    COUNT(DISTINCT "SalesOrderID") AS UNIQUE_ORDERS
+FROM ADVENTUREWORKS_DB.CLEAN.SALESORDERHEADER;
+
+SELECT
+    COUNT(*) AS TOTAL_ORDER_LINES,
+    COUNT(DISTINCT "SalesOrderDetailID") AS UNIQUE_ORDER_LINES
+FROM ADVENTUREWORKS_DB.CLEAN.SALESORDERDETAIL;
+
+
+
+CREATE OR REPLACE TABLE ADVENTUREWORKS_DB.ANALYTICS.FACT_SALES AS
+
+WITH SALES_BASE AS (
+    SELECT
+        h."SalesOrderID",
+        d."SalesOrderDetailID",
+
+        h."CustomerID",
+        d."ProductID",
+        h."TerritoryID",
+
+        h."OrderDate"::DATE AS "OrderDate",
+        h."DueDate"::DATE AS "DueDate",
+        h."ShipDate"::DATE AS "ShipDate",
+
+        h."Status" AS "OrderStatus",
+
+        d."OrderQty",
+        d."UnitPrice",
+        d."UnitPriceDiscount",
+        d."LineTotal"
+
+    FROM ADVENTUREWORKS_DB.CLEAN.SALESORDERHEADER h
+
+    INNER JOIN ADVENTUREWORKS_DB.CLEAN.SALESORDERDETAIL d
+        ON h."SalesOrderID" = d."SalesOrderID"
+),
+
+SALES_ENRICHED AS (
+    SELECT
+        sb.*,
+
+        dc."CustomerID" AS "CustomerKey",
+        dp."ProductID" AS "ProductKey",
+        dt."TerritoryID" AS "TerritoryKey",
+
+        TO_NUMBER(TO_CHAR(sb."OrderDate", 'YYYYMMDD'))
+            AS "OrderDateKey",
+
+        TO_NUMBER(TO_CHAR(sb."DueDate", 'YYYYMMDD'))
+            AS "DueDateKey",
+
+        TO_NUMBER(TO_CHAR(sb."ShipDate", 'YYYYMMDD'))
+            AS "ShipDateKey",
+
+        ROUND(
+            sb."UnitPrice" * sb."OrderQty"
+            * sb."UnitPriceDiscount", 2
+        ) AS "DiscountAmount"
+
+    FROM SALES_BASE sb
+
+    LEFT JOIN ADVENTUREWORKS_DB.ANALYTICS.DIM_CUSTOMER dc
+        ON sb."CustomerID" = dc."CustomerID"
+
+    LEFT JOIN ADVENTUREWORKS_DB.ANALYTICS.DIM_PRODUCT dp
+        ON sb."ProductID" = dp."ProductID"
+
+    LEFT JOIN ADVENTUREWORKS_DB.ANALYTICS.DIM_TERRITORY dt
+        ON sb."TerritoryID" = dt."TerritoryID"
+)
+
+SELECT *
+FROM SALES_ENRICHED;
+
+
+SELECT
+    COUNT(*) AS TOTAL_ROWS,
+    COUNT(DISTINCT "SalesOrderDetailID") AS UNIQUE_ORDER_LINES,
+    COUNT(DISTINCT "SalesOrderID") AS TOTAL_ORDERS,
+    SUM("OrderQty") AS TOTAL_QUANTITY,
+    ROUND(SUM("LineTotal"), 2) AS TOTAL_REVENUE,
+    ROUND(SUM("DiscountAmount"), 2) AS TOTAL_DISCOUNT,
+
+    COUNT_IF("CustomerKey" IS NULL) AS MISSING_CUSTOMERS,
+    COUNT_IF("ProductKey" IS NULL) AS MISSING_PRODUCTS,
+    COUNT_IF("TerritoryKey" IS NULL) AS MISSING_TERRITORIES
+
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_SALES;
+
+SELECT * FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_SALES;
+
+
+
+
+
+
+
+--Fact_Purhase
+
+CREATE OR REPLACE TABLE ADVENTUREWORKS_DB.ANALYTICS.FACT_PURCHASES AS
+
+WITH PURCHASE_BASE AS (
+    SELECT
+        h."PurchaseOrderID",
+        d."PurchaseOrderDetailID",
+
+        h."VendorID",
+        d."ProductID",
+
+        h."OrderDate"::DATE AS "OrderDate",
+        h."ShipDate"::DATE AS "ShipDate",
+
+        h."Status" AS "OrderStatus",
+
+        d."OrderQty",
+        d."ReceivedQty",
+        d."RejectedQty",
+        d."StockedQty",
+        d."UnitPrice",
+        d."LineTotal"
+
+    FROM ADVENTUREWORKS_DB.CLEAN.PURCHASEORDERHEADER h
+
+    INNER JOIN ADVENTUREWORKS_DB.CLEAN.PURCHASEORDERDETAIL d
+        ON h."PurchaseOrderID" = d."PurchaseOrderID"
+),
+
+PURCHASE_ENRICHED AS (
+    SELECT
+        pb.*,
+
+        dp."ProductID" AS "ProductKey",
+        v."BusinessEntityID" AS "VendorKey",
+
+        TO_NUMBER(TO_CHAR(pb."OrderDate", 'YYYYMMDD'))
+            AS "OrderDateKey",
+
+        TO_NUMBER(TO_CHAR(pb."ShipDate", 'YYYYMMDD'))
+            AS "ShipDateKey",
+
+        ROUND(
+            pb."ReceivedQty" * pb."UnitPrice", 2
+        ) AS "ReceivedValue",
+
+        ROUND(
+            pb."RejectedQty" * pb."UnitPrice", 2
+        ) AS "RejectedValue",
+
+        CASE
+            WHEN pb."ReceivedQty" = pb."OrderQty"
+                THEN 'Fully Received'
+            WHEN pb."ReceivedQty" > 0
+                THEN 'Partially Received'
+            WHEN pb."ReceivedQty" = 0
+                THEN 'Not Received'
+            ELSE 'Unknown'
+        END AS "ReceiptStatus"
+
+    FROM PURCHASE_BASE pb
+
+    LEFT JOIN ADVENTUREWORKS_DB.ANALYTICS.DIM_PRODUCT dp
+        ON pb."ProductID" = dp."ProductID"
+
+    LEFT JOIN ADVENTUREWORKS_DB.CLEAN.VENDOR v
+        ON pb."VendorID" = v."BusinessEntityID"
+)
+
+SELECT *
+FROM PURCHASE_ENRICHED;
+
+SELECT
+    (SELECT COUNT(*)
+     FROM ADVENTUREWORKS_DB.CLEAN.PURCHASEORDERDETAIL) AS SOURCE_ROWS,
+
+    (SELECT COUNT(*)
+     FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_PURCHASES) AS GOLD_ROWS;
+
+
+
+
+
+
+
+--Gold Validation
+
+
+SELECT 'SALES_ORDER_DATE' AS DATE_TYPE,
+       MIN("OrderDate"), MAX("OrderDate")
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_SALES
+
+UNION ALL
+
+SELECT 'SALES_DUE_DATE',
+       MIN("DueDate"), MAX("DueDate")
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_SALES
+
+UNION ALL
+
+SELECT 'SALES_SHIP_DATE',
+       MIN("ShipDate"), MAX("ShipDate")
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_SALES
+
+UNION ALL
+
+SELECT 'PURCHASE_ORDER_DATE',
+       MIN("OrderDate"), MAX("OrderDate")
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_PURCHASES
+
+UNION ALL
+
+SELECT 'PURCHASE_SHIP_DATE',
+       MIN("ShipDate"), MAX("ShipDate")
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_PURCHASES;
+
+
+
+SELECT 'DIM_DATE' AS TABLE_NAME, COUNT(*) AS TOTAL_ROWS
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_DATE
+
+UNION ALL
+
+SELECT 'DIM_CUSTOMER', COUNT(*)
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_CUSTOMER
+
+UNION ALL
+
+SELECT 'DIM_PRODUCT', COUNT(*)
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_PRODUCT
+
+UNION ALL
+
+SELECT 'DIM_TERRITORY', COUNT(*)
+FROM ADVENTUREWORKS_DB.ANALYTICS.DIM_TERRITORY
+
+UNION ALL
+
+SELECT 'FACT_SALES', COUNT(*)
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_SALES
+
+UNION ALL
+
+SELECT 'FACT_PURCHASES', COUNT(*)
+FROM ADVENTUREWORKS_DB.ANALYTICS.FACT_PURCHASES;
